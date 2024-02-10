@@ -1,0 +1,363 @@
+###########################################################################################
+# Modifications from 1.1_functions.R
+###########################################################################################
+#   - In functions pop.fn and pop.cluster.fn, variables Y and Z are transformed from 
+#        standard normal variables X1 and X2 
+#   - Throughout program, the value of Yvar is defined as Yvar = binom_n * binom_p * (1-binom_p)
+#        rather than specified directly in the simulation parameters. For binary Y,
+#        we specify population proportion binom_p instead of Yvar (see 1.1_sims.R)
+#   - At line 301, added calculation of Lee approx for median 
+#   - At line 388, added calculation of rel bias for median 
+###########################################################################################
+
+# make pop data frame -- unclustered
+pop.fn <- function(covar, delta, rpvar, binom_n, binom_p) {
+  
+  # cov is covariance between X1 and X2 (X1 turns into Y, X2 turns into Z)
+  # delta is mean of Z -- related to mean RP
+  # rpvar is variance of Z -- related to variance of RP
+  # X1 ~ Binom(binom_n, binom_p) 
+
+  # draw X1, X2 from multivar standard normal
+  sigma <- matrix(c(1, covar, covar, 1), nrow=2, ncol=2)
+  dt <- data.frame(MASS::mvrnorm(n = popobs, c(0,0), sigma))
+  names(dt) <- c("x1", "x2")
+
+  dt2 <- dt %>%
+    #apply Standard Normal CDF to get approx Unif(0,1)
+    mutate(x1.unif = pnorm(x1), 
+           x2.unif = pnorm(x2)
+           ) %>%
+    #apply inverse CDF to create new marginal distributions for Y and Z
+    mutate(y = qbinom(x1.unif, size=binom_n, prob=binom_p),
+           z = qnorm(x2.unif, mean=delta, sd=sqrt(rpvar))
+          ) %>%
+    # make RP for each case from cntns Z
+    mutate(yorig = y,
+           rp = exp(1 + z)/(1+exp(1 + z)), 
+           rrand.det = runif(n())
+           ) %>%
+    # respondent if random draw < rp
+    mutate(resp.det = as.numeric(rrand.det < rp)
+           ) %>% 
+    mutate(
+      # y_r should be missing if nonresponder
+      y_r.det = if_else(resp.det == 1, y, NA_real_), 
+      # y_nr should be missing if nonresponder
+      y_nr.det = if_else(resp.det == 0, y, NA_real_), 
+      rho = covar, 
+      delta = delta, 
+      Yvar = binom_n * binom_p * (1-binom_p))
+  
+  # check out dist of RP
+  plot(density(dt2$rp))
+  summary(dt2$rp)
+  
+  dt2
+  
+}
+
+# make clustered pop data frame
+pop.clust.fn <- function(covar, delta, rpvar, binom_n, binom_p, clustsd) {
+  # code adapted from Brady West
+  
+  # cov is covariance between X1 and X2 (X1 turns into Y, X2 turns into Z)
+  # zvar: variance of Z in population 
+  # zmean(delta): mean of Z in population (controls RR)
+  # clustsd: how diff clusters are from each other on Y (std error of cluster means)
+  
+  # A is number of clusters
+  # B vector gives number of cases in each cluster
+  
+  # initialize data vectors
+  y <- numeric(popobs)
+  z <- numeric(popobs)
+  x1<- numeric(popobs)
+  x2<- numeric(popobs)
+  clusterid <- numeric(popobs)
+  
+  from.row <- 1
+    
+  # data generation -- step through clusters
+  for (i in 1:A) {
+    
+    # from row & to row for this cluster
+    to.row <- from.row + B[i] - 1
+    
+    # select random effect for this cluster
+    # clustsd is lambda parameter in the manuscript
+    # for binary Y, bounding cluster mean between 0 and 1
+    cl.effect <- rnorm(1,mean=0,sd=clustsd) 
+    clustmean <- binom_p + cl.effect
+    if(clustmean < 0) clustmean <- 0.01
+    if(clustmean > 1) clustmean <- 0.99
+    
+    # draw X1, X2 from multivar standard normal in this cluster   
+    # covar here is rho parameter
+    # zvar is constant at 1 (rpvar)
+    sigma <- matrix(c(1, covar, covar,1), nrow=2, ncol=2)
+    x1x2 <- data.frame(MASS::mvrnorm(n = B[i], c(0, 0), sigma))
+    names(x1x2) <- c("x1","x2")
+    
+    yz <- x1x2 %>%
+      #apply Normal CDF to get Unif(0,1)
+      mutate(x1.unif = pnorm(x1,mean=0,sd=1), 
+             x2.unif = pnorm(x2,mean=0,sd=1)
+      ) %>%
+      #apply inverse CDF to create new marginal distributions for Y and Z
+      #we introduce between cluster variation here
+      mutate(y = qbinom(x1.unif, size=binom_n, prob=clustmean),
+             z = qnorm(x2.unif, mean=delta, sd=sqrt(rpvar)))
+    
+    x1[from.row:to.row] = yz[,1]
+    x2[from.row:to.row] = yz[,2]
+    y[from.row:to.row] = yz[,5]
+    z[from.row:to.row] = yz[,6]
+    clusterid[from.row:to.row] = i
+    
+    #cat(sprintf("i: = %f\nfrom: = %f;\n to: = %f\n\n", i, from.row, to.row))
+    
+    from.row = to.row + 1
+  }
+  
+  d <- data.frame(x1, x2, y, z, clusterid)
+  names(d) <- c("x1", "x2", "y", "z", "clusterid")
+  #summaryBy(data=d, FUN=c(mean,var), y+z~clusterid)
+  #summary(d)
+  
+  # turn z into rp
+  d2 <- d %>% 
+    mutate(yorig = y,
+      # make RP for each case from cntns Z
+      rp = exp(1 + z)/(1+exp(1 + z)), 
+      rrand.det = runif(n()),
+      #yrand = runif(n())
+      ) %>%
+    mutate(
+      # respondent if random draw < rp
+      resp.det = as.numeric(rrand.det < rp),
+      # make dichotomus y2
+      #y2 = as.numeric(yrand < exp(1 + y)/(1 + exp(1 + y)))
+      ) %>% 
+    mutate(
+      # y_r should be missing if nonresponder
+      y_r.det = if_else(resp.det == 1, y, NA_real_), 
+      # y_nr should be missing if nonresponder
+      y_nr.det = if_else(resp.det == 0, y, NA_real_), 
+      rho = covar, 
+      delta = delta, 
+      lambda = clustsd,
+      Yvar = binom_n * binom_p * (1-binom_p))
+  
+  summary(d2$rp)
+  # check out dist of RP
+  plot(density(d2$rp))
+  
+  d2
+}
+
+
+loop <- function(rho, delta, lambda, binom_p, i) {
+    
+    # z var -- does not vary
+    rpvar <- 1
+    # Y will be binary (one trial)
+    binom_n <- 1
+    
+    cat(sprintf("rho=%f; delta=%f; lambda=%f; binom_p=%f\n", rho, delta, lambda, binom_p))
+    
+    if (lambda == 0) {
+      # make unclustered population according to these settings
+      popdt <- pop.fn(rho, delta, rpvar, binom_n, binom_p)
+    } else {
+      # make clustered population according to these settings
+      popdt <- pop.clust.fn(rho, delta, rpvar, binom_n, binom_p, lambda)
+      
+      # set up clustered sample
+      clustsizes <- popdt %>% 
+        group_by(clusterid)  %>%
+        summarise(length = n(), .groups = 'drop') %>%
+        mutate(pi1 = a * length/popobs,
+               pi2 = b/length) 
+    }
+    
+  # output pop to dataset
+  saveRDS(popdt,file=paste("./binomial/pop", i, ".rds", sep = ""))
+  
+  #chk <- readRDS("pop1.rds")
+  #head(chk)
+  
+  ######################################################################
+  # select samples from this pop
+  
+  # to store all samples (all cases for each sample) from this pop
+  # final data set has sims * sampobs cases
+  samp.all <- data.frame()
+  
+  # summarize sampled cases into sample level dataset
+  # final data set has sims obs
+  samplvl.results <- data.frame()
+  
+  # select all SRS samples for this pop, put in 1 data frame
+  # samp.num indicates the diff samples (1:sims)
+  
+  # select each sample
+  for (s in 1:sims) {
+    
+    if (lambda == 0) {
+      # select sample 
+      samp <- popdt[srswor(sampobs, popobs)==1,] %>% 
+        mutate(wt = 1,
+               samp.num = s)
+    } else {
+      
+      selclusters <- ppss(t(as.vector(clustsizes[,2])), a)
+      
+      # all cases in selected clusters
+      tempsamp <- filter(popdt, clusterid %in% selclusters)
+      
+      # sel cases in selected clusters
+      st <- sampling::strata(data=tempsamp, c("clusterid"), 
+                             size=rep(b, each=a), method="srswor")
+      tempsamp2 <- getdata(tempsamp, st)
+      
+      samp <- inner_join(tempsamp2, clustsizes, by = "clusterid") %>%
+        mutate(pi = pi1 * pi2) %>%
+        mutate(wt = 1/pi) %>%
+        mutate(samp.num = s)
+    }
+    
+    # get results for this sample
+    samp2 <- samp %>% 
+      # for stochastic response, find which cases respond in this survey
+      mutate(rrand.stoch = runif(sampobs)) %>%
+      mutate(resp.stoch = as.numeric(rrand.stoch < rp)) %>%
+      # make new y variables for stochastic response
+      # y_r.stoch should be missing if nonresponder
+      mutate(y_r.sto = case_when(resp.stoch == 1 ~ y),
+             # y_nr.stoch should be missing if responder
+             y_nr.sto = case_when(resp.stoch == 0 ~ y),
+             id = row_number())
+    
+    # append results for this sample to big dataset
+    samp.all <- samp.all %>%
+      bind_rows(samp2)
+    
+    
+    #########################################################
+    # summarize sample into 1 obs
+    
+    if (lambda == 0) {
+      # SRS sample design 
+      svyd <- svydesign(ids = ~1, data = samp2, weights = ~wt)
+    } else {
+      # clustered sample design 
+      svyd <- svydesign(ids = ~clusterid, data = samp2, weights = ~wt)
+    }
+    
+    # summarize to one obs for this sample
+    # quantiles not workin in mutate
+    ymed <- svyquantile(~y, svyd, quantile = .5, na.rm = TRUE)
+    ymed.det <- svyquantile(~y_r.det, svyd, quantile = .5, na.rm = TRUE)
+    ymed.sto <- svyquantile(~y_r.sto, svyd, quantile = .5, na.rm = TRUE)
+    
+    samp.sum <- samp2 %>% 
+      select(samp.num, y, rp, y_r.det, y_nr.det, resp.det,
+             y_r.sto, y_nr.sto, resp.stoch)  %>%
+      summarise_all(mean, na.rm = TRUE) %>%
+      mutate(cluster = lambda, 
+             y.median = ymed,
+             y_r.det.median = ymed.det,
+             y_r.sto.median = ymed.sto)
+    
+    # Lee standard errors -- det and stoch
+    samp.sum$se1.mean.lee = (1-mymean(~resp.det, svyd)) * 
+      sqrt(myvar(~y_r.det, svyd) + myvar(~y_nr.det, svyd))
+    
+    # estimates of bias for this sample
+    samp.sum$bias1.mean = mymean(~y_r.det, svyd) - mymean(~y, svyd)
+    samp.sum$bias3.mean = mymean(~y_r.sto, svyd) - mymean(~y, svyd)
+    
+    # replication SE for this sample
+    samp3 <- samp2 %>%
+      # join samp2 to itself so each case appears 2x
+      bind_rows(samp2, .id = "set") %>%
+      # make new weights -- 0 for NRs in first occurrence
+      mutate(wt2 = case_when(
+        # these are original cases -- Rs and NRs
+        # create weight = base weight for Rs, 0 for NRs
+        set == 1 ~ resp.det * wt,
+        # these are duplicate cases that were just appended 
+        # here wt is just base weight
+        set == 2 ~ wt))
+    
+    if (lambda == 0) {
+      # SRS sample -- now clustered by id, since each case appears 2x
+      lin.dsg <- svydesign(ids = ~id, data = samp3, weights = ~wt2)
+    } else {
+      # PPS sample
+      # according to Jill's write up, clustering unit remains cluster indicator
+      lin.dsg <- svydesign(ids = ~clusterid, data = samp3, weights = ~wt2)
+    }
+    rep.dsg <- as.svrepdesign(lin.dsg, 
+                              type = "JK1")
+    boot.dsg <- as.svrepdesign(lin.dsg,
+                               type = "bootstrap")
+    
+    ##########################################################
+    # estimate bias as difference between set == 1, 2
+    
+    # means
+    bias1.mean.rep <- svyby(~y, ~set, rep.dsg, svymean, covmat = TRUE)
+    bias1.mean.lin <- svyby(~y, ~set, lin.dsg, svymean, covmat = TRUE)
+    bias1.mean.boot <- svyby(~y, ~set, boot.dsg, svymean, covmat = TRUE)
+    
+    # get stderrs on bias estimate onto summary data set
+    samp.sum$se1.mean.rep <- SE(svycontrast(bias1.mean.rep, quote(`1` - `2`)))
+    samp.sum$se1.mean.lin <- SE(svycontrast(bias1.mean.lin, quote(`1` - `2`)))
+    samp.sum$se1.mean.boot <- SE(svycontrast(bias1.mean.lin, quote(`1` - `2`)))
+    
+    # append obs for this sample to all previous samples for this pop
+    samplvl.results <- samplvl.results %>% 
+      # reduces each sample to one obs
+      bind_rows(samp.sum) 
+  }
+  
+  # add parameters for this pop to summary data sets
+  samp.all2 <- samp.all %>%
+    mutate(lambda = lambda,
+           rho = rho,
+           delta = delta, 
+           Yvar = binom_n * binom_p * (1-binom_p),
+           pop = strtoi(i))
+  
+  # further processing of data set containing 1 obs for each sample
+  samplevel.results2 <- samplvl.results %>%
+    mutate(lambda = lambda,
+           rho = rho,
+           delta = delta, 
+           Yvar = binom_n * binom_p * (1-binom_p),
+           pop = strtoi(i))
+  
+  # output samples to saved dataset
+  #write.dta(samp.all2, file=paste("samps_pop", i, ".dta", sep = ""))
+  saveRDS(samp.all2,
+          file=paste("./binomial/samps_pop", i, ".rds", sep = ""))
+  
+  # make stata version of this dataset to calc linearized stderr in stata
+  # save.dta13(samp.all2, 
+  #           paste("samps_pop", i, ".dta", sep = ""),
+  #           convert.factors = TRUE, convert.underscore = TRUE, compress = TRUE,
+  #           version=15)
+  
+  
+  # output samples to saved dataset
+  #write.dta(samplevel.results2, file=paste("samps_sum", i, ".dta", sep = ""))
+  saveRDS(samplevel.results2,
+          file=paste("./binomial/samps_sum", i, ".rds", sep = ""))
+  
+  cat(sprintf("Done with pop %s\n", i))
+  
+  return()
+}
+

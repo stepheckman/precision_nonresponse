@@ -1,0 +1,127 @@
+---
+title: "For Paper"
+author: "Stephanie Eckman"
+date: "7/7/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require(janitor)
+require(dplyr)
+
+# date for data sets to use
+date <- "20210701"
+
+results <- readRDS(paste0("cnts_results", date, ".rds"))
+results.long <- readRDS(paste0("cnts_results_long", date, ".rds"))
+sampdist <- readRDS(paste0("cnts_sampdist", date, ".rds"))
+gss.liss <- readRDS("gss_liss.rds")
+coverage <- readRDS(paste0("cnts_coverage", date, ".rds"))
+```
+
+# Results mentioned in paper
+
+## Table 1
+
+### Effect of parameters on observed values
+
+```{r t1}
+tapply(results$rr.det, results$delta, summary)
+
+# just to make sure they're similar
+tapply(results$rr.sto, results$delta, summary)
+
+tapply(results$samp_var.y, results$theta, summary)
+
+tapply(results$Bias.mean.det, results$rho, summary)
+
+# just to make sure they're similar
+tapply(results$Bias.mean.sto, results$rho, summary)
+
+
+r2 <- results %>% 
+  mutate(l2 = if_else(lambda == 0, 0, 1))
+
+tapply(r2$icc, r2$l2, summary)
+```
+
+## Section 3.1
+
+### Population Cov(Ybar, Ybar_r) across all Y^norm populations
+
+```{r r1}
+summary(results$cov.y.yr)
+```
+
+## Section 5.1, Table 5
+
+### Spread of relative bias and rr across 2 example populations
+
+``` {r r2}
+tapply(sampdist$rbias, sampdist$pm2, summary)
+tapply(sampdist$rr, sampdist$pm2, summary)
+```
+
+### Width (97.5%ile - 2.5%tile) by lambda and rho
+
+some variation by lambda, very little by rho
+
+``` {r r2again}
+check <- results %>%
+  mutate(width = rbias1.mean_q975 - rbias1.mean_q025,
+         lt = case_when(lambda == 0 & theta == 5 ~ 1,
+                        lambda > 0  & theta == 5 ~ 2,
+                        lambda == 0 & theta == 20 ~ 10,
+                        lambda > 0  & theta == 20 ~ 11)) 
+tapply(check$width, check$lambda, summary)
+tapply(check$width, check$lt, summary)
+```
+
+## Section 5.2
+
+### Population Cov(Y_r, Y_nr) across Y^norm populations
+
+``` {r r3}
+summary(results$cov.yr.ynr)
+
+tapply(results$cov.yr.ynr, results$lambda, summary)
+
+results %>%
+  dplyr::select(cov.yr.ynr, lambda) %>%
+  arrange(cov.yr.ynr)
+```
+
+### Coverage rates by method -- Y^norm
+
+``` {r r4}
+tapply(coverage$cov, coverage$.varmethod, summary)
+
+tapply(coverage$cov, interaction(coverage$lambda.f, coverage$.varmethod), summary)
+```
+
+## Section 6
+``` {r r5, rows.print = 25}
+# response rates
+gss.liss %>%
+  select(survey, rr) %>%
+  distinct()
+
+gss2 <- readRDS("gss2.rds")
+nrow(gss2)
+tabyl(gss2, wave2)
+
+liss2 <- readRDS("liss2.rds")
+nrow(liss2)
+tabyl(liss2, wave2)
+
+tapply(gss.liss$ratio.rep, gss.liss$survey, summary)
+tapply(gss.liss$ratio.lin, gss.liss$survey, summary)
+
+print(gss.liss %>%
+  select(survey, var2, bias, n, se.lee, se.lin, se.rep, ratio.rep, ratio.lin) %>%
+  arrange(survey, ratio.rep), max = 1000)
+```
